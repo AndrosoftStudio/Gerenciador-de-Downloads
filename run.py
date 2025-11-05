@@ -7,15 +7,28 @@ import time
 import json
 import sqlite3
 import webbrowser
+import os # <-- Importação correta
 import glob
+import sys
 from urllib.parse import urlparse
 from PIL import Image, ImageTk
-import sv_ttk # <--- Nova importação de Tema
+import sv_ttk 
+
+# --- 0. FUNÇÃO HELPER PARA PYINSTALLER ---
+
+def resource_path(relative_path):
+    """ Retorna o caminho absoluto para o recurso, funciona para dev e para PyInstaller """
+    try:
+        base_path = sys._MEIPASS
+    except Exception:
+        base_path = os.path.abspath(os.path.dirname(__file__))
+
+    return os.path.join(base_path, relative_path)
 
 # --- 1. CONFIGURAÇÕES E DADOS (APPDATA) ---
 
 APP_NAME = "GerenciadorDownloadsAcelerado"
-APP_VERSION = "v1.1"
+APP_VERSION = "v1.3" # Versão atualizada
 
 if os.name == 'nt':
     APP_DATA_PATH = os.path.join(os.getenv('APPDATA'), APP_NAME)
@@ -33,7 +46,8 @@ DEFAULT_SETTINGS = {
     "auto_level": "Alto",
     "language": "pt_BR",
     "theme": "Sistema",
-    "start_with_windows": False
+    "start_with_windows": False,
+    "start_with_windows_minimized": False # <--- NOVO
 }
 
 # --- 2. GERENCIADOR DE IDIOMAS (i18n) ---
@@ -49,9 +63,11 @@ class LanguageManager:
     def load_languages(self):
         """Carrega todos os arquivos .json da pasta 'idiomas'."""
         try:
-            lang_files = glob.glob(os.path.join("idiomas", "*.json"))
+            lang_path = os.path.join(resource_path("idiomas"), "*.json")
+            lang_files = glob.glob(lang_path)
+            
             if not lang_files:
-                print("ERRO: Pasta 'idiomas' não encontrada ou vazia.")
+                print(f"ERRO: Nenhum arquivo JSON encontrado em '{lang_path}'")
                 messagebox.showerror("Erro Crítico", 
                     "A pasta 'idiomas' não foi encontrada ou está vazia.\nO programa não pode funcionar sem ela.")
                 exit()
@@ -76,17 +92,16 @@ class LanguageManager:
 
     def get_string(self, key, **kwargs):
         """Retorna a string traduzida, formatando-a se necessário."""
-        string = self.strings.get(key, f"_{key}_") # Retorna a chave se não encontrar
+        string = self.strings.get(key, f"_{key}_")
         try:
             return string.format(**kwargs)
         except KeyError:
-            return string # Retorna a string sem formatação se os kwargs estiverem errados
+            return string 
 
     def get_available_languages(self):
         return list(self.languages.keys())
 
 # --- 3. BANCO DE DADOS DO HISTÓRICO ---
-# (Idêntico ao anterior, sem mudanças)
 def init_db():
     with sqlite3.connect(DB_FILE) as conn:
         cursor = conn.cursor()
@@ -123,40 +138,179 @@ def get_history():
         print(f"Erro ao ler o histórico: {e}")
         return []
 
-# --- 4. JANELAS POP-UP (Sobre, Histórico, Config, Monitor) ---
+# --- 4. DEFINIÇÃO DAS PÁGINAS (FRAMES) ---
 
-class AboutWindow(tk.Toplevel):
-    """Janela 'Sobre' (Agora não-modal e com texto traduzível)."""
-    def __init__(self, master):
-        super().__init__(master)
-        self.master_app = master
-        self.lang = master.lang_manager
+class DownloadFrame(ttk.Frame):
+    """A 'página' principal de download."""
+    def __init__(self, master, app_instance):
+        super().__init__(master, padding="15")
+        self.app_instance = app_instance
+        self.lang = app_instance.lang_manager
+        self.downloader = app_instance.downloader
+        self.style = app_instance.style
         
-        self.transient(master)
-        # self.grab_set() # Removido para ser "assíncrono" (não-modal)
+        self.create_widgets()
+        self.update_text()
 
-        try:
-            self.iconbitmap('icon.ico')
-        except tk.TclError:
-            print("Aviso: 'icon.ico' não encontrado para a janela 'Sobre'.")
+    def create_widgets(self):
+        # --- Seção de Download ---
+        self.url_label = ttk.Label(self)
+        self.url_label.pack(padx=5, pady=(5, 2), anchor='w') # <-- Mais espaço em cima
+        self.url_entry = ttk.Entry(self, width=60)
+        self.url_entry.pack(padx=5, pady=2, fill='x')
+
+        self.path_label = ttk.Label(self)
+        self.path_label.pack(padx=5, pady=(10, 5), anchor='w') # <-- Mais espaço
+        self.folder_frame = ttk.Frame(self)
+        self.folder_frame.pack(fill='x', expand=False) # <-- Não expandir
+
+        self.folder_entry = ttk.Entry(self.folder_frame, width=50)
+        self.folder_entry.pack(side=tk.LEFT, fill='x', expand=True, padx=(5, 2))
+        
+        last_path = self.app_instance.settings.get('last_path', os.path.expanduser('~/Downloads'))
+        if not os.path.isdir(last_path):
+             last_path = os.path.expanduser('~/Downloads')
+        self.folder_entry.insert(0, last_path)
+
+        self.browse_button = ttk.Button(self.folder_frame, command=self.browse_folder)
+        self.browse_button.pack(side=tk.LEFT, padx=(2, 5))
+
+        # --- Botão de Download (dinâmico) ---
+        self.download_button = ttk.Button(self, command=self.start_download_thread, style="Accent.TButton")
+        self.download_button.pack(pady=20, fill='x', ipady=5) # <-- Mais espaço
+        self.style.configure("Accent.TButton", font=("-size 10 -weight bold"))
+        
+        self.cancel_button = ttk.Button(self, command=self.cancel_download, style="Accent.TButton")
+        self.cancel_button.pack_forget()
+
+        # --- Progresso ---
+        self.progress_frame = ttk.Frame(self)
+        self.progress_frame.pack(fill=tk.X)
+        
+        self.progress_bar = ttk.Progressbar(self.progress_frame, orient='horizontal', length=100, mode='determinate')
+        self.progress_bar.pack(pady=5, fill='x', expand=True, side=tk.LEFT)
+        
+        self.monitor_button = ttk.Button(self.progress_frame, text="...", width=3, command=self.open_monitor)
+        
+        self.status_label = ttk.Label(self)
+        self.status_label.pack(pady=(10, 5), anchor='w') # <-- Mais espaço
+
+    def set_download_button_state(self, is_downloading: bool):
+        if is_downloading:
+            self.download_button.pack_forget()
+            self.cancel_button.config(text=self.lang.get_string("button_cancel"))
+            self.cancel_button.pack(pady=20, fill='x', ipady=5)
+        else:
+            self.cancel_button.pack_forget()
+            self.download_button.config(text=self.lang.get_string("button_download"))
+            self.download_button.pack(pady=20, fill='x', ipady=5)
             
-        frame = ttk.Frame(self, padding="20")
-        frame.pack(expand=True, fill=tk.BOTH)
+    def show_monitor_button(self, show: bool):
+        if show:
+            self.monitor_button.pack(side=tk.LEFT, padx=(5,0))
+        else:
+            self.monitor_button.pack_forget()
+            
+    def update_text(self):
+        """Atualiza o texto desta página."""
+        self.url_label.config(text=self.lang.get_string('label_url'))
+        self.path_label.config(text=self.lang.get_string('label_path'))
+        self.browse_button.config(text=self.lang.get_string('button_browse'))
+        self.download_button.config(text=self.lang.get_string('button_download'))
+        self.cancel_button.config(text=self.lang.get_string('button_cancel'))
+        # Não atualiza o status_label para não sobrescrever o progresso
+        
+    def get_thread_count(self):
+        mode = self.app_instance.settings['thread_mode']
+        
+        if mode == "Automático":
+            level = self.app_instance.settings['auto_level']
+            cpus = os.cpu_count() or 4 
+            if level == "Baixo":
+                return max(1, cpus // 2)
+            elif level == "Médio":
+                return cpus
+            elif level == "Alto":
+                return cpus * 2
+            elif level == "Máximo":
+                return max(16, cpus * 4)
+        elif mode == "Personalizado":
+            try:
+                val = int(self.app_instance.settings['custom_threads'])
+                return max(1, val)
+            except ValueError:
+                return 8 
+        else: 
+            try:
+                return int(mode)
+            except ValueError:
+                return 1
 
+    def browse_folder(self):
+        foldername = filedialog.askdirectory(initialdir=self.folder_entry.get())
+        if foldername:
+            self.folder_entry.delete(0, tk.END)
+            self.folder_entry.insert(0, foldername)
+            self.app_instance.settings['last_path'] = foldername
+            self.app_instance.save_settings(self.app_instance.settings)
+
+    def start_download_thread(self):
+        url = self.url_entry.get()
+        folder = self.folder_entry.get()
+        
+        if not url or not folder:
+            messagebox.showwarning(self.lang.get_string("warn_empty_fields"), 
+                                     self.lang.get_string("warn_empty_fields_msg"))
+            return
+            
+        if not os.path.isdir(folder):
+            messagebox.showerror(self.lang.get_string("error_invalid_folder"), 
+                                   self.lang.get_string("error_invalid_folder_msg"))
+            return
+
+        self.set_download_button_state(is_downloading=True)
+        self.status_label.config(text=self.lang.get_string("status_starting"))
+        
+        num_threads = self.get_thread_count()
+        
+        download_thread = threading.Thread(target=self.downloader.download_file_manager, 
+                                           args=(url, folder, num_threads))
+        download_thread.daemon = True
+        download_thread.start()
+        
+        self.app_instance.after(100, self.downloader.update_progress_bar)
+        
+    def cancel_download(self):
+        print("Cancelamento solicitado pelo usuário.")
+        self.downloader.stop_download(cancelled=True)
+        
+    def open_monitor(self):
+        self.app_instance.open_monitor()
+
+
+class AboutFrame(ttk.Frame):
+    """A 'página' Sobre."""
+    def __init__(self, master, app_instance):
+        super().__init__(master, padding="20")
+        self.app_instance = app_instance
+        self.lang = app_instance.lang_manager
+        
         try:
-            img = Image.open("icon.ico").resize((128, 128), Image.Resampling.LANCZOS)
+            # --- CORREÇÃO DO ÍCONE ---
+            # Usa resource_path para encontrar o ícone
+            img = Image.open(resource_path("icon.ico")).resize((128, 128), Image.Resampling.LANCZOS)
             self.icon_photo = ImageTk.PhotoImage(img)
-            self.icon_label = ttk.Label(frame, image=self.icon_photo)
+            self.icon_label = ttk.Label(self, image=self.icon_photo)
             self.icon_label.pack(pady=10)
         except Exception as e:
             print(f"Erro ao carregar 'icon.ico' para a janela 'Sobre': {e}")
-            self.icon_label = ttk.Label(frame, text="[Ícone não encontrado]")
+            self.icon_label = ttk.Label(self, text="[Ícone não encontrado]")
             self.icon_label.pack(pady=10)
 
-        self.title_label = ttk.Label(frame, font=("-size 12 -weight bold"))
+        self.title_label = ttk.Label(self, font=("-size 12 -weight bold"))
         self.title_label.pack(pady=5)
         
-        self.created_by_label = ttk.Label(frame, wraplength=300, justify="center")
+        self.created_by_label = ttk.Label(self, wraplength=300, justify="center")
         self.created_by_label.pack(pady=10)
 
         self.links = [
@@ -166,12 +320,9 @@ class AboutWindow(tk.Toplevel):
         ]
         
         for text, url in self.links:
-            self.create_link(frame, text, url)
+            self.create_link(self, text, url)
             
-        self.repo_link = self.create_link(frame, "", "https://github.com/AndrosoftStudio/Gerenciador-de-Downloads")
-        
-        self.close_button = ttk.Button(frame, command=self.destroy)
-        self.close_button.pack(pady=20)
+        self.repo_link = self.create_link(self, "", "https://github.com/AndrosoftStudio/Gerenciador-de-Downloads")
         
         self.update_text()
 
@@ -179,42 +330,26 @@ class AboutWindow(tk.Toplevel):
         link_label = ttk.Label(parent, text=text, foreground="blue", cursor="hand2", style="Link.TLabel")
         link_label.pack()
         link_label.bind("<Button-1>", lambda e, u=url: webbrowser.open_new_tab(u))
-        self.master.style.configure("Link.TLabel", font=("-underline 1"))
+        self.app_instance.style.configure("Link.TLabel", font=("-underline 1"))
         return link_label
 
     def update_text(self):
-        self.title(self.lang.get_string("win_about_title"))
         self.title_label.config(text=f"{self.lang.get_string('app_title')} {self.lang.get_string('version')}")
         self.created_by_label.config(text=self.lang.get_string('win_about_created_by'))
         self.repo_link.config(text=self.lang.get_string('win_about_repo'))
-        self.close_button.config(text=self.lang.get_string('win_history_close'))
 
 
-class HistoryWindow(tk.Toplevel):
-    def __init__(self, master):
-        super().__init__(master)
-        self.master_app = master
-        self.lang = master.lang_manager
-        self.geometry("800x500")
-        
-        try:
-            self.iconbitmap('icon.ico')
-        except tk.TclError:
-            print("Aviso: 'icon.ico' não encontrado para a janela 'Histórico'.")
+class HistoryFrame(ttk.Frame):
+    """A 'página' de Histórico."""
+    def __init__(self, master, app_instance):
+        super().__init__(master, padding="10")
+        self.app_instance = app_instance
+        self.lang = app_instance.lang_manager
 
-        frame = ttk.Frame(self, padding="10")
-        frame.pack(expand=True, fill=tk.BOTH)
-
-        self.cols = ('Data', 'Arquivo', 'Link', 'Pasta')
-        self.tree = ttk.Treeview(frame, columns=self.cols, show='headings')
-        self.tree.pack(expand=True, fill=tk.BOTH, side=tk.LEFT)
-
-        scrollbar = ttk.Scrollbar(frame, orient=tk.VERTICAL, command=self.tree.yview)
-        self.tree.configure(yscroll=scrollbar.set)
-        scrollbar.pack(side=tk.LEFT, fill=tk.Y)
-
+        # --- CORREÇÃO DE LAYOUT ---
+        # 1. Botões vêm primeiro, na parte de baixo
         button_frame = ttk.Frame(self, padding="10")
-        button_frame.pack(fill=tk.X)
+        button_frame.pack(fill=tk.X, side=tk.BOTTOM) 
 
         self.btn_copy = ttk.Button(button_frame, command=self.copy_link)
         self.btn_copy.pack(side=tk.LEFT, padx=5)
@@ -225,15 +360,28 @@ class HistoryWindow(tk.Toplevel):
         self.btn_redownload = ttk.Button(button_frame, command=self.redownload)
         self.btn_redownload.pack(side=tk.LEFT, padx=5)
         
-        self.btn_close = ttk.Button(button_frame, command=self.destroy)
-        self.btn_close.pack(side=tk.RIGHT, padx=5)
+        # 2. Frame da Árvore (Treeview) + Scrollbar
+        tree_frame = ttk.Frame(self)
+        tree_frame.pack(expand=True, fill=tk.BOTH, side=tk.TOP, pady=(0, 5))
+
+        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.cols = ('Data', 'Arquivo', 'Link', 'Pasta')
+        self.tree = ttk.Treeview(tree_frame, columns=self.cols, show='headings', yscrollcommand=scrollbar.set)
+        self.tree.pack(expand=True, fill=tk.BOTH, side=tk.LEFT)
         
-        self.load_history()
+        scrollbar.config(command=self.tree.yview)
+        # --- FIM DA CORREÇÃO DE LAYOUT ---
+        
         self.update_text()
         
+    def on_show(self):
+        """Chamado pela App quando esta página é mostrada."""
+        self.load_history()
+        
     def load_history(self):
-        for row in self.tree.get_children():
-            self.tree.delete(row)
+        self.tree.delete(*self.tree.get_children()) # Limpa a árvore
         history_data = get_history()
         for item in history_data:
             url, path, filename, timestamp = item
@@ -241,7 +389,6 @@ class HistoryWindow(tk.Toplevel):
             self.tree.insert("", tk.END, values=(date_str, filename, url, path))
             
     def update_text(self):
-        self.title(self.lang.get_string('win_history_title'))
         self.tree.heading('Data', text=self.lang.get_string('win_history_date'))
         self.tree.heading('Arquivo', text=self.lang.get_string('win_history_file'))
         self.tree.heading('Link', text=self.lang.get_string('win_history_link'))
@@ -249,7 +396,6 @@ class HistoryWindow(tk.Toplevel):
         self.btn_copy.config(text=self.lang.get_string('win_history_copy'))
         self.btn_open.config(text=self.lang.get_string('win_history_open'))
         self.btn_redownload.config(text=self.lang.get_string('win_history_redownload'))
-        self.btn_close.config(text=self.lang.get_string('win_history_close'))
 
     def get_selected_item_data(self):
         selected_item = self.tree.focus()
@@ -285,37 +431,34 @@ class HistoryWindow(tk.Toplevel):
         data = self.get_selected_item_data()
         if data:
             url = data[2]
-            self.master_app.set_url_from_history(url)
-            self.destroy()
+            self.app_instance.set_url_from_history(url)
+            self.app_instance.show_page("home") # Volta para a página de download
 
-class SettingsWindow(tk.Toplevel):
-    """Nova Janela de Configurações."""
-    def __init__(self, master):
-        super().__init__(master)
-        self.master_app = master
-        self.lang = master.lang_manager
-        
-        self.transient(master)
-        self.grab_set() # Modal para forçar o salvamento
-        self.geometry("450x450")
+
+class SettingsFrame(ttk.Frame):
+    """A 'página' de Configurações."""
+    def __init__(self, master, app_instance):
+        super().__init__(master, padding="15")
+        self.app_instance = app_instance
+        self.lang = app_instance.lang_manager
         
         # Carrega as configurações atuais
-        self.settings = master.settings.copy()
+        self.settings = app_instance.settings.copy()
 
         # --- Variáveis de Controle ---
-        self.thread_mode_var = tk.StringVar(value=self.settings['thread_mode'])
-        self.auto_level_var = tk.StringVar(value=self.settings['auto_level'])
-        self.custom_thread_var = tk.StringVar(value=str(self.settings['custom_threads']))
-        self.theme_var = tk.StringVar(value=self.settings['theme'])
-        self.lang_var = tk.StringVar(value=self.settings['language'])
-        self.startup_var = tk.BooleanVar(value=self.settings['start_with_windows'])
+        self.thread_mode_var = tk.StringVar(master=self, value=self.settings['thread_mode'])
+        self.auto_level_var = tk.StringVar(master=self, value=self.settings['auto_level'])
+        self.custom_thread_var = tk.StringVar(master=self, value=str(self.settings['custom_threads']))
+        self.theme_var = tk.StringVar(master=self, value=self.settings['theme'])
+        self.lang_var = tk.StringVar(master=self, value=self.settings['language'])
+        self.startup_var = tk.BooleanVar(master=self, value=self.settings['start_with_windows'])
+        # --- NOVO ---
+        self.startup_minimized_var = tk.BooleanVar(master=self, value=self.settings['start_with_windows_minimized'])
 
         # --- Criação dos Widgets ---
-        self.main_frame = ttk.Frame(self, padding="15")
-        self.main_frame.pack(fill=tk.BOTH, expand=True)
 
         # Seção de Threads
-        self.threads_frame = ttk.LabelFrame(self.main_frame, padding="10")
+        self.threads_frame = ttk.LabelFrame(self, padding="10")
         self.threads_frame.pack(fill=tk.X, pady=5)
         
         self.thread_options_frame = ttk.Frame(self.threads_frame)
@@ -336,7 +479,6 @@ class SettingsWindow(tk.Toplevel):
         
         self.thread_mode_var.trace_add('write', self.on_thread_mode_change)
         
-        # Nível Automático (para tradução)
         self.auto_level_frame = ttk.Frame(self.threads_frame)
         self.auto_level_frame.pack(fill=tk.X, pady=5)
         self.auto_level_label = ttk.Label(self.auto_level_frame, text="Nível Automático:")
@@ -346,7 +488,7 @@ class SettingsWindow(tk.Toplevel):
         
         
         # Seção de Aparência
-        self.appearance_frame = ttk.LabelFrame(self.main_frame, padding="10")
+        self.appearance_frame = ttk.LabelFrame(self, padding="10")
         self.appearance_frame.pack(fill=tk.X, pady=5)
         
         self.theme_frame = ttk.Frame(self.appearance_frame)
@@ -368,18 +510,24 @@ class SettingsWindow(tk.Toplevel):
         self.lang_combo.pack(side=tk.LEFT, padx=5)
         
         # Seção Geral
-        self.general_frame = ttk.LabelFrame(self.main_frame, padding="10")
+        self.general_frame = ttk.LabelFrame(self, padding="10")
         self.general_frame.pack(fill=tk.X, pady=5)
         
-        self.startup_check = ttk.Checkbutton(self.general_frame, variable=self.startup_var)
-        self.startup_check.pack(side=tk.LEFT, padx=5)
+        self.startup_check = ttk.Checkbutton(self.general_frame, variable=self.startup_var,
+                                             command=self.on_startup_change) # <-- Adiciona comando
+        self.startup_check.pack(side=tk.TOP, padx=5, anchor='w')
+        
+        # --- NOVO CHECKBOX ---
+        self.startup_minimized_check = ttk.Checkbutton(self.general_frame, variable=self.startup_minimized_var)
+        self.startup_minimized_check.pack(side=tk.TOP, padx=(25, 5), anchor='w') # <-- Indentado
         
         # Botão Salvar
-        self.save_button = ttk.Button(self.main_frame, command=self.save_and_close)
+        self.save_button = ttk.Button(self, command=self.save_and_return)
         self.save_button.pack(side=tk.BOTTOM, pady=20)
         
-        self.update_text() # Aplica traduções
-        self.on_thread_mode_change() # Aplica a lógica de UI
+        self.update_text() 
+        self.on_thread_mode_change() 
+        self.on_startup_change() # <-- Chama para definir o estado inicial
 
     def validate_integer(self, value_if_allowed):
         if value_if_allowed.isdigit() and len(value_if_allowed) < 4:
@@ -391,7 +539,6 @@ class SettingsWindow(tk.Toplevel):
     def on_thread_mode_change(self, *args):
         mode = self.thread_mode_var.get()
         
-        # Esconde todos os widgets dinâmicos
         self.custom_thread_entry.pack_forget()
         self.auto_level_frame.pack_forget()
 
@@ -399,17 +546,20 @@ class SettingsWindow(tk.Toplevel):
             self.auto_level_frame.pack(fill=tk.X, pady=5)
         elif mode == self.lang.get_string("win_settings_mode_custom"): # "Personalizado"
             self.custom_thread_entry.pack(side=tk.LEFT, padx=5)
+            
+    def on_startup_change(self, *args):
+        """Ativa ou desativa o checkbox 'iniciar minimizado'."""
+        if self.startup_var.get():
+            self.startup_minimized_check.config(state=tk.NORMAL)
+        else:
+            self.startup_minimized_check.config(state=tk.DISABLED)
     
     def update_text(self):
         """Atualiza todo o texto da janela com base no idioma."""
-        self.title(self.lang.get_string('win_settings_title'))
-        
-        # Labels das seções
         self.threads_frame.config(text=self.lang.get_string('win_settings_threads'))
         self.appearance_frame.config(text=self.lang.get_string('win_settings_appearance'))
         self.general_frame.config(text=self.lang.get_string('win_settings_general'))
         
-        # Opções de Threads (precisamos traduzir as opções também)
         thread_options = [
             self.lang.get_string("win_settings_mode_auto"),
             self.lang.get_string("win_settings_mode_custom"),
@@ -417,7 +567,6 @@ class SettingsWindow(tk.Toplevel):
         ]
         self.thread_combo.config(values=thread_options)
         
-        # Opções de Nível Automático
         auto_options = [
             self.lang.get_string("win_settings_auto_low"),
             self.lang.get_string("win_settings_auto_medium"),
@@ -428,7 +577,6 @@ class SettingsWindow(tk.Toplevel):
         self.auto_level_combo_2.config(values=auto_options)
         self.auto_level_label.config(text=self.lang.get_string('win_settings_auto_level'))
         
-        # Opções de Aparência
         theme_options = [
             self.lang.get_string("win_settings_theme_system"),
             self.lang.get_string("win_settings_theme_light"),
@@ -438,17 +586,18 @@ class SettingsWindow(tk.Toplevel):
         self.theme_label.config(text=self.lang.get_string('win_settings_theme'))
         self.lang_label.config(text=self.lang.get_string('win_settings_lang'))
         
-        # Opções Gerais
         self.startup_check.config(text=self.lang.get_string('win_settings_startup'))
+        # --- NOVO ---
+        self.startup_minimized_check.config(text=self.lang.get_string('win_settings_startup_minimized'))
         
-        # Botão Salvar
         self.save_button.config(text=self.lang.get_string('win_settings_save'))
 
-    def save_and_close(self):
-        """Salva as configurações no app principal e fecha a janela."""
-        # Converte as strings traduzidas de volta para chaves
+    def save_and_return(self):
+        """Salva as configurações no app principal e volta para Home."""
         
-        # Threads
+        old_theme = self.app_instance.settings['theme']
+        
+        # Converte as strings traduzidas de volta para chaves
         mode_str = self.thread_mode_var.get()
         if mode_str == self.lang.get_string("win_settings_mode_auto"):
             self.settings['thread_mode'] = "Automático"
@@ -472,7 +621,6 @@ class SettingsWindow(tk.Toplevel):
         except ValueError:
             self.settings['custom_threads'] = 8 # Padrão
             
-        # Aparência
         theme_str = self.theme_var.get()
         if theme_str == self.lang.get_string("win_settings_theme_system"):
             self.settings['theme'] = "Sistema"
@@ -482,27 +630,37 @@ class SettingsWindow(tk.Toplevel):
             self.settings['theme'] = "Escuro"
             
         self.settings['language'] = self.lang_var.get()
-        
-        # Geral
         self.settings['start_with_windows'] = self.startup_var.get()
+        # --- NOVO ---
+        self.settings['start_with_windows_minimized'] = self.startup_minimized_var.get()
         
+        new_theme = self.settings['theme']
+
         # Aplica as configurações
-        self.master_app.save_settings(self.settings)
-        self.master_app.apply_settings()
-        self.destroy()
+        self.app_instance.save_settings(self.settings)
+        self.app_instance.apply_settings()
+        
+        if new_theme == "Sistema" and old_theme != "Sistema":
+            messagebox.showinfo("Tema Alterado", 
+                                "O tema foi definido como 'Sistema'.\nReinicie o aplicativo para que a mudança tenha efeito.",
+                                parent=self)
+        
+        # Volta para a página principal
+        self.app_instance.show_page("home")
+
 
 class ThreadMonitorWindow(tk.Toplevel):
-    """Nova Janela para Monitorar Threads Individuais."""
+    """Monitor de Threads (continua Toplevel de propósito)."""
     def __init__(self, master):
         super().__init__(master)
-        self.master_app = master
+        self.app_instance = master
         self.lang = master.lang_manager
         self.downloader = master.downloader
         
         self.geometry("500x350")
         
         try:
-            self.iconbitmap('icon.ico')
+            self.iconbitmap(resource_path('icon.ico'))
         except tk.TclError:
             pass
             
@@ -538,29 +696,23 @@ class ThreadMonitorWindow(tk.Toplevel):
         self.close_button.config(text=self.lang.get_string('win_history_close'))
 
     def start_monitoring(self):
-        """Inicia o loop de atualização da janela."""
         if not self.is_running:
             return
             
         if not self.downloader.download_active or not self.downloader.is_multithreaded:
-            # Se o download acabar ou for de thread única, para de atualizar
             self.is_running = False
             self.title(self.lang.get_string('win_monitor_title') + " (Inativo)")
             return
 
         with self.downloader.global_lock:
             stats_copy = self.downloader.thread_stats.copy()
-            total_size = self.downloader.global_total_size
         
-        # Limpa a árvore
         for row in self.tree.get_children():
             self.tree.delete(row)
         
-        # Preenche com os novos dados
         for thread_id, data in stats_copy.items():
             downloaded = data['downloaded']
             speed_str = data['speed_str']
-            
             chunk_size = data['total_size']
             progress_percent = (downloaded / chunk_size) * 100 if chunk_size > 0 else 0
             
@@ -570,20 +722,24 @@ class ThreadMonitorWindow(tk.Toplevel):
             self.tree.insert("", tk.END, iid=thread_id, 
                              values=(f"Thread {thread_id}", progress_text, speed_str))
 
-        # Reagenda a atualização
         self.after(500, self.start_monitoring)
         
     def on_close(self):
         self.is_running = False
         self.destroy()
 
-# --- 5. LÓGICA DE DOWNLOAD (Atualizada para Cancelamento e Monitoramento) ---
+# --- 5. LÓGICA DE DOWNLOAD (Atualizada) ---
 
 class DownloadLogic:
     def __init__(self, app_instance):
-        self.app = app_instance
+        self.app = app_instance # Referência ao App (tk.Tk)
         self.lang = app_instance.lang_manager
+        self.download_frame = None # Será definido por set_download_frame
         self.reset_globals()
+        
+    def set_download_frame(self, frame):
+        """Define a página de download para que a lógica possa atualizar seus widgets."""
+        self.download_frame = frame
         
     def reset_globals(self):
         self.download_active = False
@@ -594,11 +750,10 @@ class DownloadLogic:
         self.global_total_size = 0
         self.global_lock = threading.Lock()
         self.url_para_historico = ""
-        # Novas variáveis para monitoramento de thread
-        self.thread_stats = {} # Ex: {0: {"downloaded": 0, "total_size": 1000, "speed_str": "0 KB/s", "last_time": 0, "last_downloaded": 0}}
+        self.thread_stats = {} 
 
     def update_progress_bar(self):
-        if not self.download_active:
+        if not self.download_active or not self.download_frame:
             return
 
         last_downloaded = self.global_total_downloaded
@@ -607,7 +762,7 @@ class DownloadLogic:
         self.app.after(500, lambda: self._update_speed_logic(last_downloaded, last_time))
 
     def _update_speed_logic(self, last_downloaded, last_time):
-        if not self.download_active:
+        if not self.download_active or not self.download_frame:
             return
 
         current_time = time.time()
@@ -632,15 +787,14 @@ class DownloadLogic:
             else:
                 self.global_speed = f"{speed_KBps:.2f} KB/s"
         
-        self.app.progress_bar['value'] = self.global_progress
-        self.app.status_label.config(text=self.lang.get_string("status_progress", 
+        # Atualiza os widgets na DownloadFrame
+        self.download_frame.progress_bar['value'] = self.global_progress
+        self.download_frame.status_label.config(text=self.lang.get_string("status_progress", 
                                        progress=self.global_progress, speed=self.global_speed))
 
-        # Re-agenda o loop
-        self.update_progress_bar()
+        self.update_progress_bar() # Reagenda o loop
 
     def download_file_chunk(self, session, url, filename, start_byte, end_byte, thread_id):
-        """Baixa um "pedaço" e reporta o progresso individual."""
         try:
             headers = {'Range': f'bytes={start_byte}-{end_byte}'}
             with session.get(url, headers=headers, stream=True, timeout=20) as response:
@@ -649,21 +803,19 @@ class DownloadLogic:
                 with open(filename, 'r+b') as f:
                     f.seek(start_byte)
                     for chunk in response.iter_content(chunk_size=1024*128):
-                        if not self.download_active: return # <--- PONTO DE CANCELAMENTO
+                        if not self.download_active: return 
                         if chunk:
                             f.write(chunk)
                             len_chunk = len(chunk)
                             
                             with self.global_lock:
                                 self.global_total_downloaded += len_chunk
-                                # Atualiza stats da thread
                                 stats = self.thread_stats[thread_id]
                                 stats['downloaded'] += len_chunk
                                 
-                                # Calcula velocidade da thread
                                 current_time = time.time()
                                 time_diff = current_time - stats['last_time']
-                                if time_diff > 0.5: # Atualiza a cada 0.5s
+                                if time_diff > 0.5: 
                                     bytes_diff = stats['downloaded'] - stats['last_downloaded']
                                     speed_bps = bytes_diff / time_diff
                                     speed_MBps = (speed_bps / 1024 / 1024)
@@ -674,7 +826,6 @@ class DownloadLogic:
                                         stats['speed_str'] = f"{speed_KBps:.2f} KB/s"
                                     stats['last_time'] = current_time
                                     stats['last_downloaded'] = stats['downloaded']
-
         except Exception as e:
             if self.download_active:
                 print(f"Erro na thread {thread_id}: {e}")
@@ -686,11 +837,11 @@ class DownloadLogic:
                 response.raise_for_status()
                 with open(filename, 'wb') as f:
                     for chunk in response.iter_content(chunk_size=1024*128):
-                        if not self.download_active: return # <--- PONTO DE CANCELAMENTO
+                        if not self.download_active: return 
                         if chunk:
                             f.write(chunk)
                             with self.global_lock:
-                                 self.global_total_downloaded += len(chunk)
+                                 self.global_total_downloaded += len_chunk
         except Exception as e:
             if self.download_active:
                 print(f"Erro no download (single): {e}")
@@ -720,10 +871,9 @@ class DownloadLogic:
                 supports_ranges = response.headers.get('Accept-Ranges') == 'bytes'
                 
                 if supports_ranges and self.global_total_size > 0 and num_threads > 1:
-                    # --- ESTRATÉGIA MULTITHREAD ---
                     self.is_multithreaded = True
-                    self.app.status_label.config(text=self.lang.get_string("status_accelerated", count=num_threads))
-                    self.app.show_monitor_button(True) # Mostra o botão do monitor
+                    self.download_frame.status_label.config(text=self.lang.get_string("status_accelerated", count=num_threads))
+                    self.download_frame.show_monitor_button(True)
                     
                     with open(filename, 'wb') as f:
                         f.seek(self.global_total_size - 1)
@@ -736,7 +886,6 @@ class DownloadLogic:
                         start_byte = i * chunk_size
                         end_byte = start_byte + chunk_size - 1 if i < num_threads - 1 else self.global_total_size - 1
                         
-                        # Prepara os stats da thread
                         this_chunk_size = (end_byte - start_byte) + 1
                         self.thread_stats[i] = {"downloaded": 0, "total_size": this_chunk_size, 
                                                 "speed_str": "0 KB/s", "last_time": time.time(), 
@@ -750,23 +899,20 @@ class DownloadLogic:
                     
                     for t in threads:
                         t.join()
-
                 else:
-                    # --- ESTRATÉGIA SINGLE-THREAD ---
                     self.is_multithreaded = False
-                    self.app.show_monitor_button(False)
+                    self.download_frame.show_monitor_button(False)
                     if num_threads > 1:
-                        self.app.status_label.config(text=self.lang.get_string("status_unsupported"))
+                        self.download_frame.status_label.config(text=self.lang.get_string("status_unsupported"))
                     else:
-                         self.app.status_label.config(text=self.lang.get_string("status_normal"))
+                         self.download_frame.status_label.config(text=self.lang.get_string("status_normal"))
                     
                     self.download_file_single(session, final_url, filename, self.global_total_size)
                 
-                # --- FINALIZAÇÃO ---
                 if self.download_active:
                     self.global_progress = 100
-                    self.app.progress_bar['value'] = 100
-                    self.app.status_label.config(text=self.lang.get_string("status_completed", file=filename))
+                    self.download_frame.progress_bar['value'] = 100
+                    self.download_frame.status_label.config(text=self.lang.get_string("status_completed", file=filename))
                     messagebox.showinfo("Sucesso", self.lang.get_string("status_completed", file=filename))
                     add_to_history(self.url_para_historico, filename)
 
@@ -777,38 +923,40 @@ class DownloadLogic:
         except Exception as e:
             self.stop_download(error=e)
         finally:
-            if self.download_active: # Se terminou normally
+            if self.download_active:
                 self.stop_download()
-            # Se foi cancelado, a label já foi setada
 
     def stop_download(self, error=None, error_msg=None, title=None, cancelled=False):
-        if not self.download_active and not cancelled: # Evita rodar múltiplas vezes
+        if not self.download_active and not cancelled:
             return 
             
         self.download_active = False
         self.is_multithreaded = False
-        self.app.show_monitor_button(False)
-        self.app.set_download_button_state(is_downloading=False) # Reseta o botão
+        
+        if not self.download_frame: # Se o frame ainda não foi setado
+            return 
+            
+        self.download_frame.show_monitor_button(False)
+        self.download_frame.set_download_button_state(is_downloading=False)
         
         if cancelled:
-            self.app.status_label.config(text=self.lang.get_string("status_cancelled"))
+            self.download_frame.status_label.config(text=self.lang.get_string("status_cancelled"))
             return
 
         if error:
             error_str = str(error)
             if "Errno 22" in error_str:
-                 self.app.status_label.config(text=self.lang.get_string("status_file_error"))
+                 self.download_frame.status_label.config(text=self.lang.get_string("status_file_error"))
                  messagebox.showerror(self.lang.get_string("error_file"),
                                       self.lang.get_string("error_file_msg", error=error))
             else:
-                self.app.status_label.config(text=self.lang.get_string("status_error", error=error_str))
+                self.download_frame.status_label.config(text=self.lang.get_string("status_error", error=error_str))
                 messagebox.showerror(self.lang.get_string("error_download"), 
                                      self.lang.get_string("error_download_msg", error=error_str))
         elif error_msg:
-            self.app.status_label.config(text=self.lang.get_string("status_error", error=error_msg))
+            self.download_frame.status_label.config(text=self.lang.get_string("status_error", error=error_msg))
             messagebox.showerror(title or self.lang.get_string("error_title"), error_msg)
         else:
-             # Download concluído com sucesso, não mostra erro
              pass
 
 # --- 6. APLICAÇÃO PRINCIPAL (GUI) ---
@@ -818,16 +966,20 @@ class App(tk.Tk):
         super().__init__()
         self.settings = self.load_settings()
         self.lang_manager = LanguageManager(self.settings)
-        self.lang = self.lang_manager # Atalho
+        self.lang = self.lang_manager 
         
         self.downloader = DownloadLogic(self)
         self.style = ttk.Style()
+        self.monitor_window = None 
         
-        self.monitor_window = None # Placeholder para a janela do monitor
+        # --- CORREÇÃO DA "TELINHA FANTASMA" ---
+        # O tema é aplicado DEPOIS que a janela 'self' (tk.Tk) existe,
+        # mas ANTES de criar os widgets.
+        self.apply_theme(on_startup=True) 
         
-        self.apply_theme() # Aplica o tema ANTES de criar os widgets
         self.create_widgets()
-        self.apply_settings() # Aplica as configurações (inclui idioma)
+        self.downloader.set_download_frame(self.pages["home"]) # Conecta a lógica à página
+        self.apply_settings() 
 
     def load_settings(self):
         try:
@@ -841,52 +993,44 @@ class App(tk.Tk):
             return DEFAULT_SETTINGS.copy()
 
     def save_settings(self, new_settings=None):
-        """Salva as configurações. Usado pela janela de Configurações."""
         if new_settings:
             self.settings = new_settings.copy()
-            
         try:
             with open(SETTINGS_FILE, 'w') as f:
                 json.dump(self.settings, f, indent=4)
         except Exception as e:
             print(f"Erro ao salvar configurações: {e}")
             
-        # Implementação "Iniciar com Windows"
-        # TODO: Isso é complexo e requer permissões/libs (ex: pywin32)
-        # Por enquanto, apenas salvamos a configuração.
         if self.settings['start_with_windows']:
             print("AVISO: 'Iniciar com Windows' está marcado, mas a implementação é complexa e não está ativa.")
-            # Aqui entraria a lógica de registro ou atalho na pasta Startup
 
     def apply_settings(self):
-        """Aplica todas as configurações salvas na aplicação."""
-        # 1. Idioma (deve ser o primeiro)
         if self.lang.current_language != self.settings['language']:
             self.lang.set_language(self.settings['language'])
             self.update_all_text()
-        
-        # 2. Tema
         self.apply_theme()
         
-        # 3. Configurações da GUI (na Janela Principal)
-        # (O código para preencher os widgets foi movido para a Janela de Configurações)
-        pass 
-        
-    def apply_theme(self):
+    def apply_theme(self, on_startup=False):
         theme = self.settings.get('theme', 'Sistema')
-        if theme == 'Claro':
-            sv_ttk.set_theme("light")
-        elif theme == 'Escuro':
-            sv_ttk.set_theme("dark")
-        else: # Sistema
-            # A função correta para voltar ao tema do sistema é "system"
-            sv_ttk.set_theme("system") # <--- CORREÇÃO APLICADA
+        if on_startup:
+            if theme == 'Claro':
+                sv_ttk.set_theme("light")
+            elif theme == 'Escuro':
+                sv_ttk.set_theme("dark")
+        else:
+            if theme == 'Claro':
+                sv_ttk.set_theme("light")
+            elif theme == 'Escuro':
+                sv_ttk.set_theme("dark")
 
     def create_widgets(self):
-        self.geometry("600x400")
+        # --- MUDANÇA: Proporção 16:9 ---
+        self.geometry("960x540") # Tamanho inicial 16:9
+        self.wm_aspect(16, 9, 16, 9) # Força a proporção 16:9
+        # --- FIM DA MUDANÇA ---
         
         try:
-            self.iconbitmap('icon.ico')
+            self.iconbitmap(resource_path('icon.ico'))
         except tk.TclError:
             print("Aviso: 'icon.ico' não encontrado ou inválido.")
 
@@ -895,182 +1039,76 @@ class App(tk.Tk):
         self.config(menu=self.menu_bar)
         
         self.menu_file = tk.Menu(self.menu_bar, tearoff=0)
-        self.menu_bar.add_cascade(label="Menu", menu=self.menu_file) # Traduzido em update_all_text
-        self.menu_file.add_command(label="Histórico", command=self.open_history)
-        self.menu_file.add_command(label="Configurações", command=self.open_settings)
-        self.menu_file.add_command(label="Sobre", command=self.open_about)
+        self.menu_bar.add_cascade(label="Menu", menu=self.menu_file) 
+        self.menu_file.add_command(label="Download", command=lambda: self.show_page("home"))
+        self.menu_file.add_command(label="Histórico", command=lambda: self.show_page("history"))
+        self.menu_file.add_command(label="Configurações", command=lambda: self.show_page("settings"))
+        self.menu_file.add_command(label="Sobre", command=lambda: self.show_page("about"))
         self.menu_file.add_separator()
         self.menu_file.add_command(label="Sair", command=self.quit)
-
-        # --- Frame Principal ---
-        frame = ttk.Frame(self, padding="15")
-        frame.pack(fill=tk.BOTH, expand=True)
-
-        # --- Seção de Download ---
-        self.url_label = ttk.Label(frame)
-        self.url_label.pack(padx=5, pady=2, anchor='w')
-        self.url_entry = ttk.Entry(frame, width=60)
-        self.url_entry.pack(padx=5, pady=2, fill='x')
-
-        self.path_label = ttk.Label(frame)
-        self.path_label.pack(padx=5, pady=5, anchor='w')
-        self.folder_frame = ttk.Frame(frame)
-        self.folder_frame.pack(fill='x', expand=True)
-
-        self.folder_entry = ttk.Entry(self.folder_frame, width=50)
-        self.folder_entry.pack(side=tk.LEFT, fill='x', expand=True, padx=(5, 2))
         
-        last_path = self.settings.get('last_path', os.path.expanduser('~/Downloads'))
-        if not os.path.isdir(last_path):
-             last_path = os.path.expanduser('~/Downloads')
-        self.folder_entry.insert(0, last_path)
-
-        self.browse_button = ttk.Button(self.folder_frame, command=self.browse_folder)
-        self.browse_button.pack(side=tk.LEFT, padx=(2, 5))
-
-        # --- Botão de Download (agora dinâmico) ---
-        self.download_button = ttk.Button(frame, command=self.start_download_thread, style="Accent.TButton")
-        self.download_button.pack(pady=15, fill='x', ipady=5)
-        self.style.configure("Accent.TButton", font=("-size 10 -weight bold"))
+        # --- Container Principal das Páginas ---
+        self.main_container = ttk.Frame(self)
+        self.main_container.pack(fill=tk.BOTH, expand=True)
         
-        # Botão de Cancelar (oculto, mesmo estilo)
-        self.cancel_button = ttk.Button(frame, command=self.cancel_download, style="Accent.TButton")
-        # self.cancel_button.pack() # Não mostra ainda
-        self.cancel_button.pack_forget() # Garante que está oculto
-
-        # --- Progresso ---
-        self.progress_frame = ttk.Frame(frame)
-        self.progress_frame.pack(fill=tk.X)
+        self.pages = {
+            "home": DownloadFrame(self.main_container, self),
+            "history": HistoryFrame(self.main_container, self),
+            "settings": SettingsFrame(self.main_container, self),
+            "about": AboutFrame(self.main_container, self)
+        }
         
-        self.progress_bar = ttk.Progressbar(self.progress_frame, orient='horizontal', length=100, mode='determinate')
-        self.progress_bar.pack(pady=5, fill='x', expand=True, side=tk.LEFT)
-        
-        # Botão do Monitor de Threads (oculto)
-        self.monitor_button = ttk.Button(self.progress_frame, text="...", width=3, command=self.open_monitor)
-        # self.monitor_button.pack_forget() # Oculto por padrão
-
-        self.status_label = ttk.Label(frame)
-        self.status_label.pack(pady=5, anchor='w')
-        
+        self.current_page_name = None
+        self.show_page("home")
         self.update_all_text() # Aplica o idioma inicial
 
-    def set_download_button_state(self, is_downloading: bool):
-        """Alterna entre o botão 'Baixar' e 'Cancelar'."""
-        if is_downloading:
-            self.download_button.pack_forget()
-            self.cancel_button.config(text=self.lang.get_string("button_cancel"))
-            self.cancel_button.pack(pady=15, fill='x', ipady=5)
-        else:
-            self.cancel_button.pack_forget()
-            self.download_button.config(text=self.lang.get_string("button_download"))
-            self.download_button.pack(pady=15, fill='x', ipady=5)
+    def show_page(self, page_name):
+        """Esconde a página atual e mostra a nova página."""
+        if self.current_page_name == page_name:
+            return # Já está na página
             
-    def show_monitor_button(self, show: bool):
-        if show:
-            self.monitor_button.pack(side=tk.LEFT, padx=(5,0))
-        else:
-            self.monitor_button.pack_forget()
+        if self.current_page_name:
+            current_page = self.pages[self.current_page_name]
+            current_page.pack_forget()
+            
+        self.current_page_name = page_name
+        page = self.pages[page_name]
+        page.pack(fill=tk.BOTH, expand=True)
+        
+        # Chama hooks de atualização se existirem
+        if hasattr(page, 'on_show'):
+            page.on_show()
 
     def update_all_text(self):
-        """Atualiza TODO o texto da GUI principal para o idioma atual."""
+        """Atualiza o texto de todas as partes da GUI."""
         self.title(f"{self.lang.get_string('app_title')} {self.lang.get_string('version')}")
         # Menu
         self.menu_bar.entryconfig(1, label=self.lang.get_string('menu_file'))
-        self.menu_file.entryconfig(0, label=self.lang.get_string('menu_history'))
-        self.menu_file.entryconfig(1, label=self.lang.get_string('menu_settings'))
-        self.menu_file.entryconfig(2, label=self.lang.get_string('menu_about'))
-        self.menu_file.entryconfig(4, label=self.lang.get_string('menu_exit'))
-        # Widgets
-        self.url_label.config(text=self.lang.get_string('label_url'))
-        self.path_label.config(text=self.lang.get_string('label_path'))
-        self.browse_button.config(text=self.lang.get_string('button_browse'))
-        self.download_button.config(text=self.lang.get_string('button_download'))
-        self.cancel_button.config(text=self.lang.get_string('button_cancel'))
-        self.status_label.config(text=self.lang.get_string('status_awaiting'))
+        self.menu_file.entryconfig(0, label="Download") # Home
+        self.menu_file.entryconfig(1, label=self.lang.get_string('menu_history'))
+        self.menu_file.entryconfig(2, label=self.lang.get_string('menu_settings'))
+        self.menu_file.entryconfig(3, label=self.lang.get_string('menu_about'))
+        self.menu_file.entryconfig(5, label=self.lang.get_string('menu_exit'))
+        
+        # Atualiza todas as páginas
+        for page in self.pages.values():
+            if hasattr(page, 'update_text'):
+                page.update_text()
+        
+        # Garante que o status da home_page não seja sobrescrito
+        if self.downloader and not self.downloader.download_active:
+             self.pages["home"].status_label.config(text=self.lang.get_string('status_awaiting'))
 
-    def get_thread_count(self):
-        """Lê as configurações (não a GUI) para decidir o número de threads."""
-        mode = self.settings['thread_mode']
-        
-        if mode == "Automático":
-            level = self.settings['auto_level']
-            cpus = os.cpu_count() or 4
-            if level == "Baixo":
-                return max(1, cpus // 2)
-            elif level == "Médio":
-                return cpus
-            elif level == "Alto":
-                return cpus * 2
-            elif level == "Máximo":
-                return max(16, cpus * 4)
-        
-        elif mode == "Personalizado":
-            return int(self.settings['custom_threads'])
-        
-        else: # Casos "1" a "8"
-            try:
-                return int(mode)
-            except ValueError:
-                return 1
-
-    def browse_folder(self):
-        foldername = filedialog.askdirectory(initialdir=self.folder_entry.get())
-        if foldername:
-            self.folder_entry.delete(0, tk.END)
-            self.folder_entry.insert(0, foldername)
-            self.settings['last_path'] = foldername
-            self.save_settings(self.settings) # Salva o caminho novo
-
-    def start_download_thread(self):
-        url = self.url_entry.get()
-        folder = self.folder_entry.get()
-        
-        if not url or not folder:
-            messagebox.showwarning(self.lang.get_string("warn_empty_fields"), 
-                                     self.lang.get_string("warn_empty_fields_msg"))
-            return
-            
-        if not os.path.isdir(folder):
-            messagebox.showerror(self.lang.get_string("error_invalid_folder"), 
-                                   self.lang.get_string("error_invalid_folder_msg"))
-            return
-
-        self.set_download_button_state(is_downloading=True)
-        self.status_label.config(text=self.lang.get_string("status_starting"))
-        
-        num_threads = self.get_thread_count()
-        
-        download_thread = threading.Thread(target=self.downloader.download_file_manager, 
-                                           args=(url, folder, num_threads))
-        download_thread.daemon = True
-        download_thread.start()
-        
-        self.after(100, self.downloader.update_progress_bar)
-        
-    def cancel_download(self):
-        """Função chamada pelo botão 'Cancelar'."""
-        print("Cancelamento solicitado pelo usuário.")
-        self.downloader.stop_download(cancelled=True)
-
-    def open_history(self):
-        HistoryWindow(self) # A janela se atualiza sozinha
-
-    def open_about(self):
-        AboutWindow(self) # A janela se atualiza sozinha
-        
-    def open_settings(self):
-        SettingsWindow(self) # A janela cuida de salvar e aplicar
-        
     def open_monitor(self):
-        """Abre o monitor de threads se não estiver aberto."""
         if self.monitor_window and self.monitor_window.winfo_exists():
-            self.monitor_window.lift() # Traz para frente
+            self.monitor_window.lift() 
         else:
             self.monitor_window = ThreadMonitorWindow(self)
 
     def set_url_from_history(self, url):
-        self.url_entry.delete(0, tk.END)
-        self.url_entry.insert(0, url)
+        """Chamado pelo HistoryFrame para preencher o link na DownloadFrame."""
+        self.pages["home"].url_entry.delete(0, tk.END)
+        self.pages["home"].url_entry.insert(0, url)
         self.attributes('-topmost', 1)
         self.attributes('-topmost', 0)
 
@@ -1080,17 +1118,9 @@ class App(tk.Tk):
 if __name__ == "__main__":
     init_db()
     
-    # Carrega as configurações apenas para definir o tema antes da janela ser criada
-    temp_settings = App.load_settings(None) # Chama o método estático
-    temp_lang = LanguageManager(temp_settings)
+    # --- CORREÇÃO DA TELINHA FANTASMA ---
+    # A lógica de aplicar o tema foi movida para DENTRO
+    # da classe App (linha 946).
     
-    theme = temp_settings.get('theme', 'Sistema')
-    if theme == 'Claro':
-        sv_ttk.set_theme("light")
-    elif theme == 'Escuro':
-        sv_ttk.set_theme("dark")
-    else:
-        sv_ttk.set_theme("system") # <--- CORREÇÃO APLICADA
-
     app = App()
     app.mainloop()
