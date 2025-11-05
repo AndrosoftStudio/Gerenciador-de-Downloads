@@ -28,7 +28,7 @@ def resource_path(relative_path):
 # --- 1. CONFIGURAÇÕES E DADOS (APPDATA) ---
 
 APP_NAME = "GerenciadorDownloadsAcelerado"
-APP_VERSION = "v1.3" # Versão atualizada
+APP_VERSION = "v1.5" # Versão atualizada
 
 if os.name == 'nt':
     APP_DATA_PATH = os.path.join(os.getenv('APPDATA'), APP_NAME)
@@ -47,7 +47,7 @@ DEFAULT_SETTINGS = {
     "language": "pt_BR",
     "theme": "Sistema",
     "start_with_windows": False,
-    "start_with_windows_minimized": False # <--- NOVO
+    "start_with_windows_minimized": False
 }
 
 # --- 2. GERENCIADOR DE IDIOMAS (i18n) ---
@@ -155,14 +155,14 @@ class DownloadFrame(ttk.Frame):
     def create_widgets(self):
         # --- Seção de Download ---
         self.url_label = ttk.Label(self)
-        self.url_label.pack(padx=5, pady=(5, 2), anchor='w') # <-- Mais espaço em cima
+        self.url_label.pack(padx=5, pady=(5, 2), anchor='w') 
         self.url_entry = ttk.Entry(self, width=60)
         self.url_entry.pack(padx=5, pady=2, fill='x')
 
         self.path_label = ttk.Label(self)
-        self.path_label.pack(padx=5, pady=(10, 5), anchor='w') # <-- Mais espaço
+        self.path_label.pack(padx=5, pady=(10, 5), anchor='w') 
         self.folder_frame = ttk.Frame(self)
-        self.folder_frame.pack(fill='x', expand=False) # <-- Não expandir
+        self.folder_frame.pack(fill='x', expand=False) 
 
         self.folder_entry = ttk.Entry(self.folder_frame, width=50)
         self.folder_entry.pack(side=tk.LEFT, fill='x', expand=True, padx=(5, 2))
@@ -177,7 +177,7 @@ class DownloadFrame(ttk.Frame):
 
         # --- Botão de Download (dinâmico) ---
         self.download_button = ttk.Button(self, command=self.start_download_thread, style="Accent.TButton")
-        self.download_button.pack(pady=20, fill='x', ipady=5) # <-- Mais espaço
+        self.download_button.pack(pady=20, fill='x', ipady=5) 
         self.style.configure("Accent.TButton", font=("-size 10 -weight bold"))
         
         self.cancel_button = ttk.Button(self, command=self.cancel_download, style="Accent.TButton")
@@ -191,9 +191,11 @@ class DownloadFrame(ttk.Frame):
         self.progress_bar.pack(pady=5, fill='x', expand=True, side=tk.LEFT)
         
         self.monitor_button = ttk.Button(self.progress_frame, text="...", width=3, command=self.open_monitor)
+        # --- CORREÇÃO DO BUG DO BOTÃO ---
+        self.monitor_button.pack_forget() # Esconde o botão por padrão
         
         self.status_label = ttk.Label(self)
-        self.status_label.pack(pady=(10, 5), anchor='w') # <-- Mais espaço
+        self.status_label.pack(pady=(10, 5), anchor='w') 
 
     def set_download_button_state(self, is_downloading: bool):
         if is_downloading:
@@ -296,8 +298,6 @@ class AboutFrame(ttk.Frame):
         self.lang = app_instance.lang_manager
         
         try:
-            # --- CORREÇÃO DO ÍCONE ---
-            # Usa resource_path para encontrar o ícone
             img = Image.open(resource_path("icon.ico")).resize((128, 128), Image.Resampling.LANCZOS)
             self.icon_photo = ImageTk.PhotoImage(img)
             self.icon_label = ttk.Label(self, image=self.icon_photo)
@@ -313,30 +313,30 @@ class AboutFrame(ttk.Frame):
         self.created_by_label = ttk.Label(self, wraplength=300, justify="center")
         self.created_by_label.pack(pady=10)
 
-        self.links = [
-            ("LinkedIn", "https://linkedin.com/in/andrejorge-devandre/"),
-            ("GitHub (Pessoal)", "https://github.com/AndrosoftStudio"),
-            ("YouTube", "https://www.youtube.com/@devandre2970"),
-        ]
+        # --- CORREÇÃO: MUDANÇA DE LINKS PARA BOTÕES ---
+        self.linkedin_button = ttk.Button(self, command=lambda: webbrowser.open_new_tab("https://linkedin.com/in/andrejorge-devandre/"))
+        self.linkedin_button.pack(pady=(10, 5), fill='x', padx=20)
+
+        self.github_button = ttk.Button(self, command=lambda: webbrowser.open_new_tab("https://github.com/AndrosoftStudio"))
+        self.github_button.pack(pady=5, fill='x', padx=20)
+
+        self.youtube_button = ttk.Button(self, command=lambda: webbrowser.open_new_tab("https://www.youtube.com/@devandre2970"))
+        self.youtube_button.pack(pady=5, fill='x', padx=20)
         
-        for text, url in self.links:
-            self.create_link(self, text, url)
-            
-        self.repo_link = self.create_link(self, "", "https://github.com/AndrosoftStudio/Gerenciador-de-Downloads")
+        self.repo_button = ttk.Button(self, command=lambda: webbrowser.open_new_tab("https://github.com/AndrosoftStudio/Gerenciador-de-Downloads"), style="Accent.TButton")
+        self.repo_button.pack(pady=(20, 5), fill='x', padx=20)
         
         self.update_text()
-
-    def create_link(self, parent, text, url):
-        link_label = ttk.Label(parent, text=text, foreground="blue", cursor="hand2", style="Link.TLabel")
-        link_label.pack()
-        link_label.bind("<Button-1>", lambda e, u=url: webbrowser.open_new_tab(u))
-        self.app_instance.style.configure("Link.TLabel", font=("-underline 1"))
-        return link_label
 
     def update_text(self):
         self.title_label.config(text=f"{self.lang.get_string('app_title')} {self.lang.get_string('version')}")
         self.created_by_label.config(text=self.lang.get_string('win_about_created_by'))
-        self.repo_link.config(text=self.lang.get_string('win_about_repo'))
+        
+        # Atualiza os botões
+        self.linkedin_button.config(text=self.lang.get_string('win_about_linkedin'))
+        self.github_button.config(text=self.lang.get_string('win_about_github'))
+        self.youtube_button.config(text=self.lang.get_string('win_about_youtube'))
+        self.repo_button.config(text=self.lang.get_string('win_about_repo'))
 
 
 class HistoryFrame(ttk.Frame):
@@ -346,7 +346,7 @@ class HistoryFrame(ttk.Frame):
         self.app_instance = app_instance
         self.lang = app_instance.lang_manager
 
-        # --- CORREÇÃO DE LAYOUT ---
+        # --- CORREÇÃO DE LAYOUT (BUG DOS BOTÕES ESCONDIDOS) ---
         # 1. Botões vêm primeiro, na parte de baixo
         button_frame = ttk.Frame(self, padding="10")
         button_frame.pack(fill=tk.X, side=tk.BOTTOM) 
@@ -453,7 +453,7 @@ class SettingsFrame(ttk.Frame):
         self.lang_var = tk.StringVar(master=self, value=self.settings['language'])
         self.startup_var = tk.BooleanVar(master=self, value=self.settings['start_with_windows'])
         # --- NOVO ---
-        self.startup_minimized_var = tk.BooleanVar(master=self, value=self.settings['start_with_windows_minimized'])
+        self.startup_minimized_var = tk.BooleanVar(master=self, value=self.settings.get('start_with_windows_minimized', False))
 
         # --- Criação dos Widgets ---
 
@@ -840,6 +840,8 @@ class DownloadLogic:
                         if not self.download_active: return 
                         if chunk:
                             f.write(chunk)
+                            # --- AQUI ESTAVA O BUG (name 'len_chunk' is not defined) ---
+                            len_chunk = len(chunk) # <--- CORREÇÃO APLICADA
                             with self.global_lock:
                                  self.global_total_downloaded += len_chunk
         except Exception as e:
@@ -973,8 +975,6 @@ class App(tk.Tk):
         self.monitor_window = None 
         
         # --- CORREÇÃO DA "TELINHA FANTASMA" ---
-        # O tema é aplicado DEPOIS que a janela 'self' (tk.Tk) existe,
-        # mas ANTES de criar os widgets.
         self.apply_theme(on_startup=True) 
         
         self.create_widgets()
@@ -1118,7 +1118,7 @@ class App(tk.Tk):
 if __name__ == "__main__":
     init_db()
     
-    # --- CORREÇÃO DA TELINHA FANTASMA ---
+    # --- CORREÇÃO DA "TELINHA FANTASMA" ---
     # A lógica de aplicar o tema foi movida para DENTRO
     # da classe App (linha 946).
     
