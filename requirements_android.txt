@@ -1,0 +1,6 @@
+# requirements_android.txt
+requests
+Pillow
+Cython
+kivy
+jnius
